@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "owl-harness"
-version = "0.1.0"
+version = "0.2.0"
 description = "Owl Harness: a small model evaluation harness with a FastAPI backend and React dashboard"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -17,10 +17,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Hugging Face datasets (needed by the built-in prompt_injection task)
-hf = ["datasets==5.1.0"]
-# Laya decision-model provider (pulls in CPU torch from PyPI)
-laya = ["laya==0.4.12"]
+# Hugging Face datasets: dataset import from the Hub and the prompt_injection example
+hf = ["datasets==5.1.0", "pyarrow==26.0.0"]
+# Parquet uploads
+parquet = ["pyarrow==26.0.0"]
+# The hf provider: run Hugging Face models locally (CPU torch from PyPI)
+hf-models = ["transformers==5.20.2", "torch==2.14.1", "sentencepiece==0.2.2", "protobuf==7.36.2"]
 dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
 
 [project.scripts]
@@ -32,7 +34,8 @@ owl = "owl.cli:app"
 mock = "owl.providers.mock:MockProvider"
 ollama = "owl.providers.ollama:OllamaProvider"
 openai = "owl.providers.openai:OpenAIProvider"
-laya = "owl.providers.laya:LayaProvider"
+hf = "owl.providers.hf:HFProvider"
+http = "owl.providers.http:HTTPProvider"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/owl"]

@@ -25,6 +25,7 @@ DEFAULT_BASE_URL = "https://api.openai.com/v1"
 class OpenAIProvider(Provider):
     name = "openai"
     max_concurrency = 4
+    display_name = "OpenAI-compatible API"
     description = "Any OpenAI-compatible chat endpoint: OpenAI itself, LM Studio, vLLM, a llama.cpp server and others."
     arg_specs = (
         ArgSpec("base_url", "string", DEFAULT_BASE_URL, "Endpoint base URL, including /v1.", affects_models=True),
@@ -61,6 +62,7 @@ class OpenAIProvider(Provider):
         self.api_key_env = api_key_env
         self.max_tokens_param = max_tokens_param
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(300.0))
+        self._info: dict[str, Any] = {}
 
     def _headers(self) -> dict[str, str]:
         key = os.environ.get(self.api_key_env)
@@ -80,6 +82,8 @@ class OpenAIProvider(Provider):
             payload["temperature"] = config.temperature
         if config.max_tokens is not None:
             payload[self.max_tokens_param] = config.max_tokens
+        if config.seed is not None:
+            payload["seed"] = config.seed
 
         t0 = time.perf_counter()
         resp = await self._client.post(f"{self.base_url}/chat/completions", json=payload, headers=self._headers())
@@ -91,6 +95,11 @@ class OpenAIProvider(Provider):
         choice = data["choices"][0]
         finish = choice.get("finish_reason")
         usage = data.get("usage") or {}
+        # The served model name and backend fingerprint identify the exact version that answered.
+        if data.get("model"):
+            self._info["served_model"] = data["model"]
+        if data.get("system_fingerprint"):
+            self._info["system_fingerprint"] = data["system_fingerprint"]
         return ModelOutput(
             text=choice["message"].get("content") or "",
             latency_ms=latency_ms,
@@ -98,6 +107,9 @@ class OpenAIProvider(Provider):
             usage=Usage(input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens")),
             raw={"finish_reason": finish, "id": data.get("id")},
         )
+
+    def model_info(self) -> dict[str, Any]:
+        return dict(self._info)
 
     async def close(self) -> None:
         await self._client.aclose()

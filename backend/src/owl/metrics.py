@@ -300,3 +300,146 @@ def accuracy_by_length(pairs: Sequence[tuple[int, bool]], buckets: int = 4) -> l
             }
         )
     return out
+
+
+# --- multi-class -------------------------------------------------------------------
+
+UNPARSEABLE = "(unparseable)"
+
+
+def multiclass_report(rows: Sequence[Row], labels: Sequence[str]) -> dict:
+    """Per-class precision, recall, F1 and support, macro and weighted F1, and the confusion matrix.
+
+    Labels compare case-insensitively. An unparseable answer is wrong: it is a false negative
+    for its true class and a false positive for no class, and it gets its own matrix column.
+    Rows whose target is not in `labels` still count toward accuracy but have no class row.
+    """
+    canon = {l.casefold(): l for l in labels}
+
+    def key(v: str | None) -> str | None:
+        return None if v is None else canon.get(v.casefold(), v)
+
+    tp = {l: 0 for l in labels}
+    fp = {l: 0 for l in labels}
+    fn = {l: 0 for l in labels}
+    columns = [*labels, UNPARSEABLE]
+    matrix = {l: {c: 0 for c in columns} for l in labels}
+    for r in rows:
+        t, p = key(r.target), key(r.pred)
+        if t in matrix:
+            matrix[t][p if p in matrix[t] else UNPARSEABLE] += 1
+        if p is not None and p == t and t in tp:
+            tp[t] += 1
+            continue
+        if t in fn:
+            fn[t] += 1
+        if p is not None and p in fp:
+            fp[p] += 1
+
+    per_class = []
+    for l in labels:
+        precision, recall, f1 = precision_recall_f1(tp[l], fp[l], fn[l])
+        per_class.append(
+            {"label": l, "precision": precision, "recall": recall, "f1": f1, "support": tp[l] + fn[l]}
+        )
+    support = sum(c["support"] for c in per_class)
+    macro = sum(c["f1"] for c in per_class) / len(per_class) if per_class else 0.0
+    weighted = sum(c["f1"] * c["support"] for c in per_class) / support if support else 0.0
+    return {
+        "labels": list(labels),
+        "per_class": per_class,
+        "macro_f1": macro,
+        "weighted_f1": weighted,
+        "matrix": [[matrix[l][c] for c in columns] for l in labels],
+        "matrix_columns": columns,
+    }
+
+
+# --- uncertainty for metrics without a closed form ------------------------------------
+
+
+def bootstrap(
+    rows: Sequence[Row],
+    statistic,  # Callable[[Sequence[Row]], float]
+    resamples: int = 1000,
+    seed: int = 0,
+) -> tuple[float, float, float]:
+    """(stderr, ci_low, ci_high) of `statistic` by the percentile bootstrap.
+
+    The generator is seeded, so the same rows always give the same interval.
+    """
+    import random
+
+    n = len(rows)
+    if n < 2:
+        v = statistic(rows) if n else 0.0
+        return 0.0, v, v
+    rng = random.Random(seed)
+    values = sorted(statistic([rows[rng.randrange(n)] for _ in range(n)]) for _ in range(resamples))
+    mean = sum(values) / resamples
+    se = math.sqrt(sum((v - mean) ** 2 for v in values) / (resamples - 1))
+    return se, percentile(values, 2.5), percentile(values, 97.5)
+
+
+def mean_with_ci(values: Sequence[float], z: float = 1.96) -> tuple[float, float, float, float]:
+    """(mean, stderr, ci_low, ci_high) with the normal approximation; stderr uses n-1."""
+    n = len(values)
+    if n == 0:
+        return 0.0, 0.0, 0.0, 0.0
+    mean = sum(values) / n
+    if n < 2:
+        return mean, 0.0, mean, mean
+    se = math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1) / n)
+    return mean, se, mean - z * se, mean + z * se
+
+
+def judge_scores(rows: Sequence[Row], kind: str) -> list[float]:
+    """Numeric judge scores. An unparseable verdict counts as the worst score (0 or 1)."""
+    worst = 0.0 if kind == "passfail" else 1.0
+    out = []
+    for r in rows:
+        try:
+            out.append(float(r.pred) if r.pred is not None else worst)
+        except ValueError:
+            out.append(worst)
+    return out
+
+
+def headline_metrics(
+    rows: Sequence[Row],
+    mode: str,
+    positive_class: str | None = None,
+    labels: Sequence[str] | None = None,
+) -> dict[str, float]:
+    """The headline numbers for a scoring mode, each with stderr and a 95% interval.
+
+    accuracy (every mode except the 1-5 scale): Wilson interval.
+    F1 (binary) and macro-F1 (multi-class): percentile bootstrap.
+    mean score (1-5 judge): normal approximation.
+    """
+    out: dict[str, float] = {}
+    n = len(rows)
+    correct = sum(1 for r in rows if r.correct)
+    lo, hi = wilson_interval(correct, n)
+    out["accuracy_ci_low"], out["accuracy_ci_high"] = lo, hi
+
+    if mode == "binary" and positive_class is not None:
+
+        def f1(rs: Sequence[Row]) -> float:
+            c = confusion(rs, positive_class)
+            return precision_recall_f1(c["tp"], c["fp"], c["fn"])[2]
+
+        out["f1_stderr"], out["f1_ci_low"], out["f1_ci_high"] = bootstrap(rows, f1)
+    elif mode == "multiclass" and labels:
+        report = multiclass_report(rows, labels)
+        out["macro_f1"] = report["macro_f1"]
+        out["weighted_f1"] = report["weighted_f1"]
+        se, a, b = bootstrap(rows, lambda rs: multiclass_report(rs, labels)["macro_f1"])
+        out["macro_f1_stderr"], out["macro_f1_ci_low"], out["macro_f1_ci_high"] = se, a, b
+    elif mode == "judge_passfail":
+        out["pass_rate"] = correct / n if n else 0.0
+    elif mode == "judge_scale":
+        mean, se, a, b = mean_with_ci(judge_scores(rows, "scale"))
+        out["mean_score"], out["mean_score_stderr"] = mean, se
+        out["mean_score_ci_low"], out["mean_score_ci_high"] = max(1.0, a), min(5.0, b)
+    return out

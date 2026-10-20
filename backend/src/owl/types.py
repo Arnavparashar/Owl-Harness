@@ -62,6 +62,11 @@ class Score(BaseModel):
 class GenerateConfig(BaseModel):
     temperature: float | None = None
     max_tokens: int | None = None
+    # Passed to providers that support seeded sampling (Ollama, OpenAI-compatible, Hugging Face, HTTP).
+    seed: int | None = None
+
+
+ScoringMode = Literal["binary", "multiclass", "exact_match", "judge_passfail", "judge_scale"]
 
 
 class RunConfig(BaseModel):
@@ -79,3 +84,11 @@ class RunConfig(BaseModel):
     system_prompt: str | None = None
     # How a custom (user-defined) task was set up; None for built-in tasks.
     task_spec: dict[str, Any] | None = None
+    # Added in v0.2. Runs recorded earlier leave these empty and are read with sensible fallbacks.
+    scoring_mode: ScoringMode | None = None
+    # The resolved prompt templates: {"system": ..., "user": ...}
+    prompt: dict[str, Any] = Field(default_factory=dict)
+    # Scorer configuration: labels, normalisation, judge and rubric, ...
+    scorer: dict[str, Any] = Field(default_factory=dict)
+    # Version facts the provider reported: digest, revision, library versions.
+    model_info: dict[str, Any] = Field(default_factory=dict)

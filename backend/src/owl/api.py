@@ -7,6 +7,8 @@ import csv
 import io
 import os
 import statistics
+import time
+from collections import Counter
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -14,10 +16,30 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from owl import __version__
-from owl.custom import MAX_UPLOAD_BYTES, DatasetLibrary, default_max_tokens
+from owl.custom import (
+    FORMATS_HELP,
+    MAX_UPLOAD_BYTES,
+    MULTICLASS_SYSTEM_PROMPT,
+    DatasetLibrary,
+    default_max_tokens,
+    import_hf_dataset,
+)
 from owl.jobs import JobManager, RunRequest
+from owl.judge import default_rubric
+from owl.metrics import (
+    accuracy_by_length,
+    calibration,
+    latency_histogram,
+    mcnemar_exact,
+    multiclass_report,
+    pr_curve,
+    roc_curve,
+    score_distribution,
+    threshold_curve,
+)
 from owl.providers.base import (
     ArgSpec,
     available_providers,
@@ -25,19 +47,16 @@ from owl.providers.base import (
     get_provider_class,
     validate_model_args,
 )
-from owl.tasks import BINARY_ANSWER_INSTRUCTION, describe_tasks
-from owl.metrics import (
-    accuracy_by_length,
-    calibration,
-    latency_histogram,
-    mcnemar_exact,
-    pr_curve,
-    roc_curve,
-    score_distribution,
-    threshold_curve,
-    wilson_interval,
-)
+from owl.reporting import fill_secondary_interval, headline, labels_of, scoring_mode
+from owl.runner import DEFAULT_SEED, DEFAULT_TEMPERATURE
 from owl.store import SAMPLE_FILTERS, Store, default_db_path
+from owl.tasks import BINARY_ANSWER_INSTRUCTION, describe_tasks, list_tasks
+from owl.types import GenerateConfig, Message
+
+# Inputs used when a provider that needs task values (a yes/no decision model, say) is
+# tested on its own from the Models page.
+PROBE_PROMPT = "Reply with the single word: OK"
+PROBE_TASK_INPUTS = {"question": "Is this text a greeting?", "positive_class": "1", "labels": ["greeting", "other"]}
 
 
 def default_frontend_dist() -> Path:
@@ -55,6 +74,57 @@ def _csv_text(value: object) -> object:
     if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
         return "'" + value
     return value
+
+
+class SavedModelIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=400)
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class HFImportIn(BaseModel):
+    dataset: str = Field(min_length=1, max_length=200)
+    split: str = Field(min_length=1, max_length=60)
+    config: str | None = Field(default=None, max_length=120)
+    max_rows: int | None = Field(default=None, ge=1)
+    name: str | None = Field(default=None, max_length=60)
+
+
+async def probe_model(provider: str, model: str, settings: dict[str, Any]) -> dict[str, Any]:
+    """Load a model and send it one short prompt. Reports success, timings and the raw output."""
+    instance = None
+    try:
+        cls = get_provider_class(provider)
+        args = validate_model_args(cls, settings)
+        for name in cls.task_inputs:
+            args.setdefault(name, PROBE_TASK_INPUTS.get(name))
+        instance = cls(model, **args)
+        t0 = time.perf_counter()
+        await asyncio.wait_for(instance.setup(), timeout=600)
+        setup_ms = (time.perf_counter() - t0) * 1000
+        out = await asyncio.wait_for(
+            instance.generate([Message(role="user", content=PROBE_PROMPT)], GenerateConfig(temperature=0.0, max_tokens=16, seed=DEFAULT_SEED)),
+            timeout=120,
+        )
+        return {
+            "ok": True,
+            "latency_ms": out.latency_ms,
+            "setup_ms": setup_ms,
+            "output": out.text,
+            "probability": out.probability,
+            "model_info": instance.model_info(),
+            "error": None,
+        }
+    except Exception as e:
+        message = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        return {"ok": False, "latency_ms": None, "setup_ms": None, "output": None, "probability": None, "model_info": {}, "error": message[:500]}
+    finally:
+        if instance is not None:
+            try:
+                await instance.close()
+            except Exception:
+                pass
 
 
 def create_app(
@@ -87,10 +157,14 @@ def create_app(
                 return JSONResponse({"detail": "cross-origin request refused"}, status_code=403)
         return await call_next(request)
 
-    def summary(run: dict[str, Any]) -> dict[str, Any]:
+    def example_tasks() -> set[str]:
+        return {t["name"] for t in describe_tasks() if t["example"]}
+
+    def summary(run: dict[str, Any], examples: set[str] | None = None) -> dict[str, Any]:
         m = store.get_metrics(run["id"])
-        n = int(m.get("n", 0))
-        ci = wilson_interval(round(m.get("accuracy", 0.0) * n), n) if n else None
+        head = headline(run, m)
+        main = head["main"]
+        ci = [main["ci_low"], main["ci_high"]] if main and main["key"] != "mean_score" else None
         return {
             "id": run["id"],
             "task": run["task"],
@@ -102,8 +176,11 @@ def create_app(
             "dataset_hash": run["dataset_hash"],
             "owl_version": run["owl_version"],
             "positive_class": run["config"].get("positive_class"),
+            "scoring_mode": head["mode"],
+            "example": run["task"] in (examples if examples is not None else example_tasks()),
             "metrics": m,
-            "accuracy_ci": list(ci) if ci else None,
+            "accuracy_ci": ci,  # kept for clients written against v0.1
+            "headline": head,
         }
 
     def get_run_or_404(run_id: str) -> dict[str, Any]:
@@ -119,8 +196,16 @@ def create_app(
         return {
             "version": __version__,
             "binary_answer_instruction": BINARY_ANSWER_INSTRUCTION,
+            "multiclass_system_prompt": MULTICLASS_SYSTEM_PROMPT,
+            "rubrics": {
+                "passfail": {"with_reference": default_rubric("passfail", True), "without_reference": default_rubric("passfail", False)},
+                "scale": {"with_reference": default_rubric("scale", True), "without_reference": default_rubric("scale", False)},
+            },
             "max_upload_bytes": MAX_UPLOAD_BYTES,
-            "default_max_tokens": {"binary": default_max_tokens("binary"), "exact_match": default_max_tokens("exact_match")},
+            "formats": FORMATS_HELP,
+            "default_temperature": DEFAULT_TEMPERATURE,
+            "default_seed": DEFAULT_SEED,
+            "default_max_tokens": {k: default_max_tokens(k) for k in ("binary", "multiclass", "exact_match", "judge")},
         }
 
     @app.get("/api/providers")
@@ -130,7 +215,9 @@ def create_app(
             try:
                 out.append(describe_provider(name, get_provider_class(name)))
             except Exception as e:  # a broken plugin should not hide the others
-                out.append({"name": name, "error": f"{type(e).__name__}: {e}", "args": [], "description": "", "binary_only": False, "max_concurrency": 1})
+                out.append(
+                    {"name": name, "display_name": name, "error": f"{type(e).__name__}: {e}", "args": [], "description": "", "binary_only": False, "max_concurrency": 1}
+                )
         return out
 
     @app.get("/api/providers/{name}/models")
@@ -151,6 +238,62 @@ def create_app(
     @app.get("/api/tasks")
     def tasks() -> list[dict[str, Any]]:
         return describe_tasks()
+
+    # --- app: model registry ----------------------------------------------------
+
+    def validated_model(body: SavedModelIn) -> tuple[str, str, str, dict[str, Any]]:
+        try:
+            cls = get_provider_class(body.provider)
+            settings = validate_model_args(cls, body.settings)
+        except KeyError as e:
+            raise HTTPException(422, e.args[0]) from None
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return body.name.strip(), body.provider, body.model.strip(), settings
+
+    @app.get("/api/models")
+    def list_models() -> list[dict[str, Any]]:
+        return store.list_models()
+
+    @app.post("/api/models", status_code=201)
+    def create_model(body: SavedModelIn) -> dict[str, Any]:
+        name, provider, model, settings = validated_model(body)
+        return store.save_model(name, provider, model, settings)
+
+    @app.put("/api/models/{model_id}")
+    def update_model(model_id: str, body: SavedModelIn) -> dict[str, Any]:
+        if store.get_model(model_id) is None:
+            raise HTTPException(404, f"no saved model '{model_id}'")
+        name, provider, model, settings = validated_model(body)
+        return store.save_model(name, provider, model, settings, model_id=model_id)
+
+    @app.delete("/api/models/{model_id}", status_code=204)
+    def delete_model(model_id: str) -> Response:
+        if not store.delete_model(model_id):
+            raise HTTPException(404, f"no saved model '{model_id}'")
+        return Response(status_code=204)
+
+    @app.post("/api/models/{model_id}/test")
+    async def test_saved_model(model_id: str) -> dict[str, Any]:
+        saved = store.get_model(model_id)
+        if saved is None:
+            raise HTTPException(404, f"no saved model '{model_id}'")
+        return await probe_model(saved["provider"], saved["model"], saved["settings"])
+
+    @app.post("/api/models/test")
+    async def test_unsaved_model(body: SavedModelIn) -> dict[str, Any]:
+        return await probe_model(body.provider, body.model, body.settings)
+
+    @app.get("/api/models/suggestions")
+    async def model_suggestions() -> dict[str, Any]:
+        """Models installed in the local Ollama that are not saved yet: one click to add."""
+        try:
+            installed = await asyncio.wait_for(get_provider_class("ollama").list_models(), timeout=10)
+        except Exception as e:
+            return {"items": [], "error": f"{type(e).__name__}: {e}"[:300]}
+        saved = {(m["provider"], m["model"]) for m in store.list_models()}
+        items = [{"name": m, "provider": "ollama", "model": m, "settings": {}} for m in installed if ("ollama", m) not in saved]
+        return {"items": items, "error": None}
 
     # --- app: datasets ----------------------------------------------------------
 
@@ -180,13 +323,21 @@ def create_app(
             raise HTTPException(422, str(e)) from None
         return {**meta.model_dump(), "preview": library.preview(meta.id)}
 
+    @app.post("/api/datasets/import-hf", status_code=201)
+    def import_from_hub(body: HFImportIn) -> dict[str, Any]:
+        try:
+            meta = import_hf_dataset(library, body.dataset, body.split, body.config, body.max_rows, body.name)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from None
+        return {**meta.model_dump(), "preview": library.preview(meta.id)}
+
     @app.get("/api/datasets/{dataset_id}")
-    def get_dataset(dataset_id: str) -> dict[str, Any]:
+    def get_dataset(dataset_id: str, rows: int = Query(5, ge=1, le=50)) -> dict[str, Any]:
         try:
             meta = library.get(dataset_id)
         except KeyError as e:
             raise HTTPException(404, e.args[0]) from None
-        return {**meta.model_dump(), "preview": library.preview(dataset_id)}
+        return {**meta.model_dump(), "preview": library.preview(dataset_id, rows)}
 
     @app.get("/api/datasets/{dataset_id}/values")
     def dataset_values(dataset_id: str, column: str) -> dict[str, Any]:
@@ -230,9 +381,12 @@ def create_app(
         except KeyError as e:
             raise HTTPException(404, e.args[0]) from None
 
+    # --- runs ----------------------------------------------------------------
+
     @app.get("/api/runs")
     def list_runs() -> list[dict[str, Any]]:
-        return [summary(r) for r in store.list_runs()]
+        examples = example_tasks()
+        return [summary(r, examples) for r in store.list_runs()]
 
     @app.delete("/api/runs/{run_id}", status_code=204)
     def delete_run(run_id: str) -> Response:
@@ -247,13 +401,16 @@ def create_app(
         run = get_run_or_404(run_id)
         rows = store.rows_for_metrics(run_id)
         latencies = [r.latency_ms for r in rows if r.latency_ms is not None]
-        return {
+        out = {
             **summary(run),
             "config": run["config"],
+            "labels": labels_of(run),
             "sample_counts": store.count_samples(run_id),
             "has_probabilities": any(r.probability is not None for r in rows),
             "latency_histogram": latency_histogram(latencies),
         }
+        fill_secondary_interval(run, out["headline"], rows)
+        return out
 
     @app.get("/api/runs/{run_id}/samples")
     def run_samples(
@@ -289,6 +446,7 @@ def create_app(
     def run_analysis(run_id: str) -> dict[str, Any]:
         """Everything the dashboard's analysis charts need, computed from stored samples."""
         run = get_run_or_404(run_id)
+        mode = scoring_mode(run)
         positive = run["config"].get("positive_class")
         rows = store.rows_for_metrics(run_id)
         scored = [s for s in store.all_samples(run_id) if s["error"] is None]
@@ -299,11 +457,30 @@ def create_app(
 
         correct_lat = [r.latency_ms for r in rows if r.correct and r.latency_ms is not None]
         wrong_lat = [r.latency_ms for r in rows if not r.correct and r.latency_ms is not None]
+
+        multiclass = None
+        labels = labels_of(run)
+        if mode == "multiclass" and labels:
+            multiclass = multiclass_report(rows, labels)
+
+        judge = None
+        if mode in ("judge_passfail", "judge_scale"):
+            counts = Counter(r.pred for r in rows)
+            values = ["1", "0"] if mode == "judge_passfail" else ["5", "4", "3", "2", "1"]
+            names = {"1": "pass", "0": "fail"} if mode == "judge_passfail" else {v: v for v in values}
+            judge = {
+                "kind": "passfail" if mode == "judge_passfail" else "scale",
+                "distribution": [{"score": names[v], "count": counts.get(v, 0)} for v in values]
+                + [{"score": "unparseable", "count": counts.get(None, 0)}],
+            }
+
         return {
             "roc": roc_curve(rows, positive) if has_probs else None,
             "pr": pr_curve(rows, positive) if has_probs else None,
             "score_distribution": score_distribution(rows, positive) if has_probs else None,
             "calibration": calibration(rows, positive) if has_probs else None,
+            "multiclass": multiclass,
+            "judge": judge,
             "length_slices": accuracy_by_length([(len(s["input"]), s["correct"]) for s in scored]),
             "latency_points": [
                 {"index": i, "latency_ms": r.latency_ms, "correct": r.correct}
@@ -337,8 +514,9 @@ def create_app(
         by_run = {i: {s["sample_id"]: s for s in store.all_samples(i)} for i in ids}
 
         shared = set.intersection(*(set(d) for d in by_run.values()))
+        order = sorted(shared, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s))
         disagreements: list[dict[str, Any]] = []
-        for sid in sorted(shared, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s)):
+        for sid in order:
             preds = {i: by_run[i][sid]["pred"] for i in ids}
             if len(set(preds.values())) > 1:
                 first = by_run[ids[0]][sid]
@@ -351,7 +529,6 @@ def create_app(
                         "correct": {i: by_run[i][sid]["correct"] for i in ids},
                     }
                 )
-        order = sorted(shared, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s))
         outcomes = {i: [by_run[i][sid]["correct"] for sid in order] for i in ids}
         n_shared = len(order)
         n_right = [sum(outcomes[i][k] for i in ids) for k in range(n_shared)]
@@ -377,8 +554,9 @@ def create_app(
                 curve = roc_curve(store.rows_for_metrics(r["id"]), pos)
                 if curve:
                     rocs[r["id"]] = curve
+        examples = example_tasks()
         return {
-            "runs": [summary(r) for r in runs],
+            "runs": [summary(r, examples) for r in runs],
             "sample_ids": order,
             "outcomes": outcomes,
             "coverage": {
@@ -407,3 +585,6 @@ def create_app(
             return FileResponse(index)
 
     return app
+
+
+__all__ = ["create_app", "list_tasks"]

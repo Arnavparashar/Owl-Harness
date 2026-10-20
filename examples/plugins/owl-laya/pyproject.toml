@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "owl-laya"
+version = "0.1.0"
+description = "Owl Harness provider plugin for the Laya yes/no decision model"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    # Owl itself is not pinned here: install the plugin into an environment that already has Owl.
+    "owl-harness",
+    "laya==0.4.12",
+]
+
+# This entry point is all Owl needs to discover the provider.
+[project.entry-points."owl.providers"]
+laya = "owl_laya:LayaProvider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/owl_laya"]

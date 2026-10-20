@@ -1,33 +1,22 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { api, isActive, type Job, type JobItem } from "../api";
-import { btnSecondary, Card, ErrorNote, Loading, ProgressBar } from "../components/ui";
-import { dateTime, num, pct, usePolling, useAsync } from "../lib";
-
-const ITEM_LABEL: Record<JobItem["status"], string> = {
-  queued: "waiting",
-  running: "running",
-  completed: "done",
-  completed_with_errors: "done, some samples failed",
-  failed: "failed",
-  cancelled: "cancelled",
-};
-
-const JOB_LABEL: Record<Job["status"], string> = {
-  queued: "Waiting for an earlier job to finish",
-  running: "Running",
-  completed: "Finished",
-  failed: "Finished with a failure",
-  cancelled: "Cancelled",
-};
+import { api, isActive, type JobItem } from "../api";
+import { Card, Chip, ErrorNote, Loading, ProgressBar, StatusPill } from "../components/ui";
+import { dateTime, duration, MODE_LABEL, pct, usePolling, useAsync } from "../lib";
+import { useModelColor } from "../theme";
 
 export default function JobPage() {
   const { jobId = "" } = useParams();
   const [tick, setTick] = useState(0);
   const { data: job, error, loading } = useAsync(() => api.job(jobId), [jobId, tick]);
   const [cancelError, setCancelError] = useState<string>();
+  const [now, setNow] = useState(Date.now());
 
   usePolling(job ? isActive(job) : false, () => setTick((n) => n + 1), 1000);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const cancel = async () => {
     setCancelError(undefined);
@@ -42,49 +31,52 @@ export default function JobPage() {
   const finished = job?.items.filter((i) => i.run_id && i.status.startsWith("completed")) ?? [];
 
   return (
-    <div className="mx-auto max-w-4xl space-y-5">
-      <Link to="/" className="text-sm text-accent hover:underline">
-        ← All runs
-      </Link>
+    <div className="mx-auto max-w-5xl space-y-5">
       {loading && !job && <Loading />}
       {error && !job && <ErrorNote message={error} />}
       {job && (
         <>
-          <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="glass rise flex flex-wrap items-start justify-between gap-4 px-6 py-5">
             <div>
-              <h1 className="text-lg font-semibold text-slate-900">{job.task}</h1>
-              <p className="mt-1 text-sm text-slate-600">
-                {JOB_LABEL[job.status]}
-                {job.cancel_requested && isActive(job) ? ", cancelling…" : ""} · started {dateTime(job.created_at)}
-                {job.limit ? ` · first ${job.limit} samples` : ""}
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-2xl font-semibold tracking-tight text-ink">{job.task}</h2>
+                <StatusPill status={job.status} />
+                <Chip>{MODE_LABEL[job.scoring_mode]}</Chip>
+              </div>
+              <p className="mt-2 text-sm text-sub">
+                started {dateTime(job.created_at)}
+                {job.limit ? ` · first ${job.limit} samples` : ""} · {job.items.length} model{job.items.length === 1 ? "" : "s"}, one after another
+                {job.cancel_requested && isActive(job) ? " · cancelling…" : ""}
               </p>
-              {job.description && <p className="mt-0.5 text-xs text-slate-500">{job.description}</p>}
+              {job.description && <p className="mt-1 text-xs text-faint">{job.description}</p>}
             </div>
             {isActive(job) && (
-              <button className={btnSecondary} onClick={cancel} disabled={job.cancel_requested}>
+              <button className="btn btn-secondary" onClick={cancel} disabled={job.cancel_requested}>
                 {job.cancel_requested ? "Cancelling…" : "Cancel"}
               </button>
             )}
           </div>
           {cancelError && <ErrorNote message={cancelError} />}
+          {job.warnings.map((w) => (
+            <div key={w} className="rounded-[12px] border border-warn/40 bg-warn/10 px-4 py-2.5 text-sm text-warn">
+              {w}
+            </div>
+          ))}
 
           <div className="space-y-3">
             {job.items.map((item, i) => (
-              <ItemCard key={`${item.model}-${i}`} item={item} />
+              <ItemCard key={`${item.model}-${i}`} item={item} now={now} judged={job.scoring_mode.startsWith("judge")} />
             ))}
           </div>
 
           {!isActive(job) && (
             <div className="flex flex-wrap items-center gap-3">
               {finished.length >= 2 && (
-                <Link
-                  to={`/compare?runs=${finished.map((i) => i.run_id).join(",")}`}
-                  className="rounded bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-[#1e40af]"
-                >
+                <Link to={`/compare?runs=${finished.map((i) => i.run_id).join(",")}`} className="btn btn-primary">
                   Compare these {finished.length} runs
                 </Link>
               )}
-              <Link to="/new" className={btnSecondary}>
+              <Link to="/new" className="btn btn-secondary">
                 Start another run
               </Link>
             </div>
@@ -95,17 +87,21 @@ export default function JobPage() {
   );
 }
 
-function ItemCard({ item }: { item: JobItem }) {
-  const pending = item.status === "queued";
+function ItemCard({ item, now, judged }: { item: JobItem; now: number; judged: boolean }) {
+  const colorOf = useModelColor();
+  const running = item.status === "running";
   const answered = item.done - item.errors;
+  // ETA from the pace so far; the warm-up before the first sample is not part of it.
+  const started = item.started_at ? new Date(item.started_at).getTime() : undefined;
+  const eta = running && started && item.done > 0 && item.total > item.done ? ((now - started) / 1000 / item.done) * (item.total - item.done) : undefined;
+
   return (
     <Card>
-      <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <div className="flex items-baseline gap-3">
-          <h2 className="text-sm font-semibold text-slate-900">{item.model}</h2>
-          <span className={`text-sm ${item.status === "failed" ? "text-danger" : item.status === "running" ? "text-accent" : "text-slate-600"}`}>
-            {ITEM_LABEL[item.status]}
-          </span>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-3">
+          <span className="h-3 w-3 rounded-full" style={{ background: colorOf(item.model) }} />
+          <h3 className="text-[15px] font-semibold text-ink">{item.model}</h3>
+          <StatusPill status={item.status} />
         </div>
         {item.run_id && (
           <Link to={`/runs/${item.run_id}`} className="text-sm font-medium text-accent hover:underline">
@@ -114,32 +110,42 @@ function ItemCard({ item }: { item: JobItem }) {
         )}
       </div>
 
-      {!pending && (
-        <div className="mt-3 space-y-1.5">
+      {item.status !== "queued" && (
+        <div className="mt-4 space-y-2.5">
           {item.total > 0 ? (
             <>
-              <ProgressBar value={item.done} max={item.total} />
-              <div className="flex flex-wrap justify-between gap-2 text-xs tabular-nums text-slate-600">
+              <ProgressBar value={item.done} max={item.total} running={running} />
+              <div className="num flex flex-wrap justify-between gap-2 text-[13px] text-sub">
                 <span>
-                  {item.done} of {item.total} samples
+                  <span className="text-ink">{item.done}</span> of {item.total} samples
+                  {eta !== undefined && <span className="text-faint"> · about {duration(eta)} left</span>}
                 </span>
                 <span>
-                  {answered > 0 ? `${item.correct} of ${answered} correct so far (${pct(item.correct / answered, 0)})` : "no answers yet"}
-                  {item.errors > 0 && <span className="text-danger"> · {item.errors} failed</span>}
+                  {answered > 0 ? (
+                    <>
+                      <span className="text-ink">{item.correct}</span> {judged ? "passed" : "correct"} of {answered} · current {judged ? "pass rate" : "accuracy"}{" "}
+                      <span className="font-semibold text-ink">{pct(item.correct / answered)}</span>
+                    </>
+                  ) : (
+                    "no answers yet"
+                  )}
+                  {item.errors > 0 && <span className="text-bad"> · {item.errors} failed</span>}
                 </span>
               </div>
             </>
           ) : (
-            item.status === "running" && <p className="text-xs text-slate-500">Loading the model and warming up…</p>
+            running && <p className="text-[13px] text-faint">Loading the model and warming up. This is not counted in latency.</p>
           )}
-          {item.accuracy !== null && (
-            <p className="text-sm text-slate-800">
-              Final accuracy <span className="font-semibold tabular-nums">{num(item.accuracy)}</span>
+          {item.main_metric && (
+            <p className="text-sm text-sub">
+              Final {item.main_metric.name}{" "}
+              <span className="num gradient-text text-lg font-semibold">{item.main_metric.name === "mean score" ? item.main_metric.value.toFixed(2) : item.main_metric.value.toFixed(3)}</span>
             </p>
           )}
         </div>
       )}
-      {item.error && <p className="mt-2 break-words rounded border border-danger/30 px-3 py-2 text-sm text-danger">{item.error}</p>}
+      {item.status === "queued" && <p className="mt-3 text-[13px] text-faint">Waiting for the models before it.</p>}
+      {item.error && <p className="mt-3 break-words rounded-[10px] border border-bad/40 bg-bad/10 px-3 py-2 text-sm text-bad">{item.error}</p>}
     </Card>
   );
 }

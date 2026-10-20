@@ -33,9 +33,18 @@ def _now() -> str:
 
 
 class ModelSpec(BaseModel):
-    provider: str = Field(min_length=1, max_length=64)
-    model: str = Field(min_length=1, max_length=200)
+    """A model to test: a saved one (`model_id`) or provider, model and settings given here."""
+
+    model_id: str | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=64)
+    model: str | None = Field(default=None, min_length=1, max_length=400)
     args: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _given(self) -> "ModelSpec":
+        if not self.model_id and not (self.provider and self.model):
+            raise ValueError("each model needs either model_id or provider and model")
+        return self
 
 
 class RunRequest(BaseModel):
@@ -48,6 +57,10 @@ class RunRequest(BaseModel):
     max_concurrency: int | None = Field(default=None, ge=1, le=64)
     timeout_s: float = Field(default=120.0, gt=0, le=3600)
     retries: int = Field(default=2, ge=0, le=10)
+    # Generation settings for this run; unset keeps the test's own (temperature 0 and seed 42 by default).
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=1, le=8192)
+    seed: int | None = Field(default=None, ge=0, le=2**31 - 1)
 
     @model_validator(mode="after")
     def _one_task(self) -> "RunRequest":
@@ -86,6 +99,13 @@ class JobItem:
 
     def to_dict(self, store: Store) -> dict[str, Any]:
         metrics = store.get_metrics(self.run_id) if self.run_id and self.status.startswith("completed") else {}
+        main = None
+        if "mean_score" in metrics:
+            main = {"name": "mean score", "value": metrics["mean_score"]}
+        elif "pass_rate" in metrics:
+            main = {"name": "pass rate", "value": metrics["pass_rate"]}
+        elif "accuracy" in metrics:
+            main = {"name": "accuracy", "value": metrics["accuracy"]}
         return {
             "model": self.name,
             "status": self.status,
@@ -98,6 +118,7 @@ class JobItem:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "accuracy": metrics.get("accuracy"),
+            "main_metric": main,
         }
 
 
@@ -111,6 +132,7 @@ class Job:
         self.created_at = _now()
         self.finished_at: str | None = None
         self.cancel_requested = False
+        self.warnings: list[str] = []
 
     def to_dict(self, store: Store) -> dict[str, Any]:
         return {
@@ -118,6 +140,8 @@ class Job:
             "status": self.status,
             "task": self.task.name,
             "description": self.task.description,
+            "scoring_mode": self.task.mode,
+            "warnings": self.warnings,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "cancel_requested": self.cancel_requested,
@@ -138,20 +162,51 @@ class JobManager:
 
     # --- public ---------------------------------------------------------------
 
+    def _resolve(self, spec: Any) -> tuple[str, str, dict[str, Any]]:
+        """(provider, model, settings) for a model spec, looking saved models up by id."""
+        if spec.model_id:
+            saved = self.store.get_model(spec.model_id)
+            if saved is None:
+                raise KeyError(f"no saved model '{spec.model_id}'")
+            provider, model, args = saved["provider"], saved["model"], {**saved["settings"], **spec.args}
+        else:
+            provider, model, args = spec.provider, spec.model, spec.args
+        if "/" in provider:
+            raise ValueError(f"invalid provider name '{provider}'")
+        cls = get_provider_class(provider)  # KeyError if unknown
+        split_model_string(f"{provider}/{model}")
+        return provider, model, validate_model_args(cls, args)
+
     def submit(self, request: RunRequest) -> Job:
         """Validate everything up front (so mistakes fail fast), then queue the job."""
-        task = get_task(request.task) if request.task else build_task(request.custom, self.library)  # type: ignore[arg-type]
+        warnings: list[str] = []
+        judge_model: tuple[str, str] | None = None
+        if request.task:
+            task = get_task(request.task)
+        else:
+            custom = request.custom
+            assert custom is not None
+            if custom.judge is not None:
+                provider, model, args = self._resolve(custom.judge)
+                if get_provider_class(provider).binary_only:
+                    raise ValueError(f"{provider} only answers yes/no questions and cannot be a judge")
+                judge_model = (provider, model)
+                resolved = custom.judge.model_copy(update={"model_id": None, "provider": provider, "model": model, "args": args})
+                custom = custom.model_copy(update={"judge": resolved})
+            task = build_task(custom, self.library, timeout_s=request.timeout_s)
+
         items: list[JobItem] = []
         for m in request.models:
-            if "/" in m.provider:
-                raise ValueError(f"invalid provider name '{m.provider}'")
-            cls = get_provider_class(m.provider)  # KeyError if unknown
-            if cls.binary_only and task.positive_class is None:
-                raise ValueError(f"{m.provider} only answers yes/no questions and cannot run this test")
-            split_model_string(f"{m.provider}/{m.model}")
-            items.append(JobItem(m.provider, m.model, validate_model_args(cls, m.args)))
+            provider, model, args = self._resolve(m)
+            if get_provider_class(provider).binary_only and task.positive_class is None:
+                raise ValueError(f"{provider} only answers yes/no questions and cannot run this test")
+            items.append(JobItem(provider, model, args))
+            if judge_model == (provider, model):
+                # Allowed, but worth knowing: self-grading tends to be lenient.
+                warnings.append(f"{provider}/{model} is also the judge. A model grading its own answers tends to be lenient.")
 
         job = Job(request, task, items)
+        job.warnings = warnings
         with self._lock:
             self._jobs[job.id] = job
             while len(self._jobs) > MAX_JOBS_KEPT:
@@ -279,6 +334,7 @@ class JobManager:
             retries=req.retries,
             on_progress=on_progress,
             on_start=on_start,
+            generate_overrides={"temperature": req.temperature, "max_tokens": req.max_tokens, "seed": req.seed},
         )
         item.run_id = run_id
         run = self.store.get_run(run_id)

@@ -24,7 +24,8 @@ def test_split_model_string():
 
 
 def test_builtin_providers_are_registered():
-    assert {"mock", "ollama", "openai", "laya"} <= set(available_providers())
+    names = set(available_providers())
+    assert {"mock", "ollama", "openai", "hf", "http"} <= names
 
 
 def test_create_builtin_provider():
@@ -53,7 +54,7 @@ def test_installed_entry_points_cover_builtins():
     from importlib.metadata import entry_points
 
     names = {ep.name for ep in entry_points(group=base.ENTRY_POINT_GROUP)}
-    assert {"mock", "ollama", "openai", "laya"} <= names  # needs `pip install -e`
+    assert {"mock", "ollama", "openai", "hf", "http"} <= names  # needs `pip install -e`
 
 
 def test_non_provider_target_is_rejected():
@@ -83,9 +84,9 @@ async def test_mock_modes():
         create_provider("mock/unknown-mode")
 
 
-def test_laya_requires_instruction():
-    with pytest.raises(ValueError, match="instruction"):
-        create_provider("laya/english")
+def test_question_driven_provider_requires_question():
+    with pytest.raises(ValueError, match="question"):
+        create_provider("yesno/x")
 
 
 def test_openai_provider_reads_key_from_environment(monkeypatch):

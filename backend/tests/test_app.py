@@ -146,10 +146,12 @@ def test_build_binary_task(library):
     meta = library.add("reviews.csv", CSV.encode())
     task = build_task(CustomTaskSpec(**spec(meta.id)), library)
     samples = task.load_dataset().samples
-    assert [s.target for s in samples] == ["1", "0", "1", "0", "1", "0"] and samples[1].metadata == {"label": "negative"}
+    assert [s.target for s in samples] == ["1", "0", "1", "0", "1", "0"]
+    # every sample keeps its full row, so templates and the http provider can use any column
+    assert samples[1].metadata == {"label": "negative", "row": {"text": "Terrible service", "label": "negative", "note": "b"}}
     assert task.positive_class == "1" and task.generate.max_tokens == 16
     assert task.system_prompt == "Is this review positive?\nAnswer with only a single character: 1 for yes, 0 for no."
-    assert task.provider_args == {"laya": {"instruction": "Is this review positive?"}}
+    assert task.question == "Is this review positive?" and task.provider_args == {}  # handed to providers via task_inputs
     assert task.spec["positive_label"] == "positive"
 
 
@@ -191,12 +193,12 @@ def test_provider_arg_validation():
         validate_model_args(ollama, {"evil": 1})
     with pytest.raises(ValueError, match="must be a boolean"):
         validate_model_args(ollama, {"think": "yes"})
-    laya = get_provider_class("laya")
-    assert validate_model_args(laya, {"threshold": "0.4"}) == {"threshold": 0.4}
-    with pytest.raises(ValueError, match="no setting 'instruction'"):  # supplied by the task, not the user
-        validate_model_args(laya, {"instruction": "x"})
+    yesno = get_provider_class("yesno")
+    assert validate_model_args(yesno, {"threshold": "0.4"}) == {"threshold": 0.4}
+    with pytest.raises(ValueError, match="no setting 'question'"):  # supplied by the task, not the user
+        validate_model_args(yesno, {"question": "x"})
     with pytest.raises(ValueError, match="must be a number"):
-        validate_model_args(laya, {"threshold": True})
+        validate_model_args(yesno, {"threshold": True})
 
 
 def test_task_plugins_are_discovered(monkeypatch):
@@ -214,13 +216,15 @@ def test_task_plugins_are_discovered(monkeypatch):
 
 def test_providers_and_config(client):
     by_name = {p["name"]: p for p in client.get("/api/providers").json()}
-    assert {"mock", "ollama", "openai", "laya"} <= set(by_name)
-    assert by_name["laya"]["binary_only"] is True and by_name["ollama"]["binary_only"] is False
+    assert {"mock", "ollama", "openai", "hf", "http"} <= set(by_name)
+    assert "laya" not in by_name or by_name["laya"]["binary_only"] is True  # Laya is a plugin now
+    assert by_name["yesno"]["binary_only"] is True and by_name["ollama"]["binary_only"] is False
+    assert by_name["openai"]["display_name"] == "OpenAI-compatible API"
     base_url = next(a for a in by_name["ollama"]["args"] if a["name"] == "base_url")
     assert base_url["affects_models"] is True and base_url["type"] == "string"
     cfg = client.get("/api/config").json()
     assert cfg["binary_answer_instruction"].startswith("Answer with only a single character")
-    assert cfg["default_max_tokens"] == {"binary": 16, "exact_match": 256}
+    assert cfg["default_max_tokens"]["binary"] == 16 and cfg["default_max_tokens"]["exact_match"] == 256
 
 
 def test_provider_models(client):
@@ -332,7 +336,7 @@ def test_job_validation(client, body, message):
 def test_exact_match_rejects_yes_no_only_providers(client):
     did = upload(client).json()["id"]
     exact = spec(did, kind="exact_match", question=None, positive_label=None)
-    res = client.post("/api/jobs", json={"custom": exact, "models": [{"provider": "laya", "model": "english"}]})
+    res = client.post("/api/jobs", json={"custom": exact, "models": [{"provider": "yesno", "model": "x"}]})
     assert res.status_code == 422 and "only answers yes/no" in res.json()["detail"]
     ok = client.post("/api/jobs", json={"custom": exact, "models": [{"provider": "mock", "model": "always1"}]})
     assert ok.status_code == 201

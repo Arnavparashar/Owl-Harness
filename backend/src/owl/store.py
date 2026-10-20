@@ -55,6 +55,27 @@ CREATE TABLE IF NOT EXISTS metrics (
 );
 """
 
+# Schema migrations, applied in order. `PRAGMA user_version` records how many have run.
+# Never edit a migration that has shipped; append a new one. Every migration must keep
+# existing rows intact.
+MIGRATIONS: list[str] = [
+    # 1: runs, samples, metrics (the v1 schema; databases from before versioning already have it)
+    SCHEMA,
+    # 2: saved model configurations for the dashboard's model registry
+    """
+    CREATE TABLE IF NOT EXISTS models (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        settings_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
+]
+SCHEMA_VERSION = len(MIGRATIONS)
+
 SAMPLE_FILTERS = ("all", "correct", "incorrect", "false_positive", "false_negative", "unparseable")
 
 
@@ -100,8 +121,29 @@ class Store:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
-        self._conn.executescript(SCHEMA)
+        self.migrated_from: int | None = None
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring the schema up to date. An existing database is backed up first."""
+        version = self._conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            return
+        has_data = self._conn.execute(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='runs'"
+        ).fetchone()[0]
+        if has_data and str(self.path) != ":memory:":
+            backup = self.path.with_name(f"{self.path.name}.bak-v{version}")
+            if not backup.exists():
+                dest = sqlite3.connect(str(backup))
+                with dest:
+                    self._conn.backup(dest)
+                dest.close()
+        for number in range(version, SCHEMA_VERSION):
+            self._conn.executescript(MIGRATIONS[number])
+            self._conn.execute(f"PRAGMA user_version = {number + 1}")
         self._conn.commit()
+        self.migrated_from = version
 
     def close(self) -> None:
         with self._lock:
@@ -143,6 +185,11 @@ class Store:
             )
         return run_id
 
+    def update_config(self, run_id: str, config: RunConfig) -> None:
+        """Replace a run's recorded config (used to add facts only known after the run, such as a model digest)."""
+        with self._tx() as c:
+            c.execute("UPDATE runs SET config_json=? WHERE id=?", (config.model_dump_json(), run_id))
+
     def set_status(self, run_id: str, status: str, finished: bool = False) -> None:
         with self._tx() as c:
             if finished:
@@ -168,10 +215,6 @@ class Store:
     def list_runs(self) -> list[dict[str, Any]]:
         rows = self._all("SELECT * FROM runs ORDER BY started_at DESC, id DESC")
         return [self._run_dict(r) for r in rows]
-
-    def delete_run(self, run_id: str) -> None:
-        with self._tx() as c:
-            c.execute("DELETE FROM runs WHERE id=?", (run_id,))
 
     # --- samples ------------------------------------------------------------
 
@@ -287,6 +330,44 @@ class Store:
 
     def get_metrics(self, run_id: str) -> dict[str, float]:
         return {r["name"]: r["value"] for r in self._all("SELECT name, value FROM metrics WHERE run_id=?", (run_id,))}
+
+
+    # --- model registry -------------------------------------------------------
+
+    @staticmethod
+    def _model_dict(row: sqlite3.Row) -> dict[str, Any]:
+        d = dict(row)
+        d["settings"] = json.loads(d.pop("settings_json"))
+        return d
+
+    def list_models(self) -> list[dict[str, Any]]:
+        return [self._model_dict(r) for r in self._all("SELECT * FROM models ORDER BY lower(name), id")]
+
+    def get_model(self, model_id: str) -> dict[str, Any] | None:
+        rows = self._all("SELECT * FROM models WHERE id=?", (model_id,))
+        return self._model_dict(rows[0]) if rows else None
+
+    def save_model(self, name: str, provider: str, model: str, settings: dict[str, Any], model_id: str | None = None) -> dict[str, Any]:
+        now = utcnow()
+        with self._tx() as c:
+            if model_id is None:
+                model_id = secrets.token_hex(6)
+                c.execute(
+                    "INSERT INTO models (id, name, provider, model, settings_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                    (model_id, name, provider, model, json.dumps(settings), now, now),
+                )
+            else:
+                c.execute(
+                    "UPDATE models SET name=?, provider=?, model=?, settings_json=?, updated_at=? WHERE id=?",
+                    (name, provider, model, json.dumps(settings), now, model_id),
+                )
+        saved = self.get_model(model_id)
+        assert saved is not None
+        return saved
+
+    def delete_model(self, model_id: str) -> bool:
+        with self._tx() as c:
+            return c.execute("DELETE FROM models WHERE id=?", (model_id,)).rowcount > 0
 
 
 # Numeric sample ids sort numerically; others fall back to text order.

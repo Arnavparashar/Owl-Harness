@@ -38,6 +38,7 @@ packaging==26.3
 pandas==3.0.6
 pluggy==1.7.0
 propcache==0.5.4
+protobuf==7.36.2
 pyarrow==26.0.0
 pydantic==2.14.1
 pydantic_core==2.50.1
@@ -49,6 +50,7 @@ PyYAML==6.0.3
 regex==2026.9.29
 rich==15.0.0
 safetensors==0.8.0
+sentencepiece==0.2.2
 setuptools==84.0.0
 shellingham==1.5.4
 six==1.17.0
@@ -57,7 +59,7 @@ sympy==1.14.0
 tokenizers==0.23.3
 torch==2.14.1
 tqdm==4.70.1
-transformers==5.20.1
+transformers==5.20.2
 truststore==0.10.5
 typer==0.27.3
 typing-inspection==0.4.4
@@ -66,3 +68,4 @@ tzdata==2026.5
 uvicorn==0.54.0
 xxhash==4.0.2
 yarl==1.25.1
+# editable installs: owl-harness (this repo, backend/) and owl-laya (examples/plugins/owl-laya)

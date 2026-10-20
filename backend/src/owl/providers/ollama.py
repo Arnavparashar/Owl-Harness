@@ -27,6 +27,7 @@ def _base_url(value: str | None) -> str:
 class OllamaProvider(Provider):
     name = "ollama"
     max_concurrency = 1
+    display_name = "Ollama"
     description = "Local models served by Ollama, called through its native chat API."
     arg_specs = (
         ArgSpec("base_url", "string", DEFAULT_BASE_URL, "Ollama server address.", affects_models=True),
@@ -51,6 +52,7 @@ class OllamaProvider(Provider):
         super().__init__(model, **model_args)
         self.base_url = _base_url(base_url)
         self.think = bool(think)
+        self._info: dict[str, Any] = {}
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=httpx.Timeout(300.0))
 
     async def setup(self) -> None:
@@ -59,6 +61,19 @@ class OllamaProvider(Provider):
             await self._client.get("/api/version")
         except httpx.HTTPError as e:
             raise RuntimeError(f"cannot reach Ollama at {self.base_url}: {e}") from e
+        try:  # record exactly which build of the model ran
+            version = (await self._client.get("/api/version")).json().get("version")
+            tags = (await self._client.get("/api/tags")).json().get("models", [])
+            entry = next((m for m in tags if m.get("name") == self.model or m.get("model") == self.model), None)
+            self._info = {"ollama_version": version}
+            if entry:
+                self._info["digest"] = entry.get("digest")
+                details = entry.get("details") or {}
+                for k in ("parameter_size", "quantization_level", "family"):
+                    if details.get(k):
+                        self._info[k] = details[k]
+        except (httpx.HTTPError, ValueError):
+            self._info = {}
         await self._chat(
             [{"role": "user", "content": "Reply with 0."}],
             {"num_predict": 1, "temperature": 0},
@@ -83,6 +98,8 @@ class OllamaProvider(Provider):
             options["temperature"] = config.temperature
         if config.max_tokens is not None:
             options["num_predict"] = config.max_tokens
+        if config.seed is not None:
+            options["seed"] = config.seed
         payload_messages = [{"role": m.role, "content": m.content} for m in messages]
 
         t0 = time.perf_counter()
@@ -101,6 +118,9 @@ class OllamaProvider(Provider):
             usage=Usage(input_tokens=data.get("prompt_eval_count"), output_tokens=data.get("eval_count")),
             raw=raw,
         )
+
+    def model_info(self) -> dict[str, Any]:
+        return dict(self._info)
 
     async def close(self) -> None:
         await self._client.aclose()

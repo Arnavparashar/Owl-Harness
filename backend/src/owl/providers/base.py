@@ -12,6 +12,7 @@ Models are addressed as `provider/model`, e.g. `ollama/qwen3.5:4b`.
 from __future__ import annotations
 
 import importlib
+import json
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
 from importlib.metadata import entry_points
@@ -26,7 +27,8 @@ _BUILTIN: dict[str, str] = {
     "mock": "owl.providers.mock:MockProvider",
     "ollama": "owl.providers.ollama:OllamaProvider",
     "openai": "owl.providers.openai:OpenAIProvider",
-    "laya": "owl.providers.laya:LayaProvider",
+    "hf": "owl.providers.hf:HFProvider",
+    "http": "owl.providers.http:HTTPProvider",
 }
 
 
@@ -35,11 +37,15 @@ class ArgSpec:
     """One user-settable model argument. The dashboard builds its form from these."""
 
     name: str
-    type: Literal["string", "number", "integer", "boolean"] = "string"
+    type: Literal["string", "number", "integer", "boolean", "json"] = "string"
     default: Any = None
     description: str = ""
     # True when the value changes which models are available (for example the server URL).
     affects_models: bool = False
+    # Shown in the form instead of the raw name.
+    label: str = ""
+    # Allowed values for a string setting (the form shows a picker).
+    choices: tuple[str, ...] = ()
 
 
 class Provider(ABC):
@@ -54,6 +60,20 @@ class Provider(ABC):
     arg_specs: ClassVar[tuple[ArgSpec, ...]] = ()
     # True for providers that can only answer yes/no questions (they cannot do exact match).
     binary_only: ClassVar[bool] = False
+    # Shown in the dashboard instead of the id (the id stays the same in model strings).
+    display_name: ClassVar[str] = ""
+    # Task-level values the provider wants as model args, for models that are not prompted.
+    # "question" is the yes/no question of a binary test; "labels" the label set of a
+    # multi-class test; "positive_class" the target value meaning yes.
+    task_inputs: ClassVar[tuple[str, ...]] = ()
+
+    def model_info(self) -> dict[str, Any]:
+        """Version facts recorded on the run: a digest, a revision, library versions.
+
+        Called after `setup()` and again after the run (some APIs only reveal the
+        model version in their responses). Return only what the provider really knows.
+        """
+        return {}
 
     @classmethod
     async def list_models(cls, **model_args: Any) -> list[str]:
@@ -111,6 +131,7 @@ def get_provider_class(name: str) -> type[Provider]:
 def describe_provider(name: str, cls: type[Provider]) -> dict[str, Any]:
     return {
         "name": name,
+        "display_name": cls.display_name or name,
         "description": cls.description,
         "max_concurrency": cls.max_concurrency,
         "binary_only": cls.binary_only,
@@ -144,10 +165,18 @@ def validate_model_args(cls: type[Provider], args: dict[str, Any]) -> dict[str, 
             elif spec.type == "boolean":
                 if not isinstance(value, bool):
                     raise ValueError
+            elif spec.type == "json":
+                if isinstance(value, str):
+                    value = json.loads(value)
+                if not isinstance(value, (dict, list)):
+                    raise ValueError
             else:
                 value = str(value)
         except (TypeError, ValueError):
-            raise ValueError(f"setting '{key}' must be a {spec.type}") from None
+            kind = "JSON object or list" if spec.type == "json" else spec.type
+            raise ValueError(f"setting '{key}' must be a {kind}") from None
+        if spec.choices and value not in spec.choices:
+            raise ValueError(f"setting '{key}' must be one of: {', '.join(spec.choices)}")
         out[key] = value
     return out
 

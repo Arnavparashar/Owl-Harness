@@ -2,6 +2,24 @@
 
 export type Metrics = Record<string, number>;
 
+export type ScoringMode = "binary" | "multiclass" | "exact_match" | "judge_passfail" | "judge_scale";
+
+export interface Stat {
+  key: string;
+  label: string;
+  value: number;
+  stderr: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  range?: [number, number];
+}
+
+export interface Headline {
+  mode: ScoringMode;
+  main: Stat | null;
+  secondary: Stat | null;
+}
+
 export interface RunSummary {
   id: string;
   task: string;
@@ -13,22 +31,30 @@ export interface RunSummary {
   dataset_hash: string;
   owl_version: string;
   positive_class: string | null;
+  scoring_mode: ScoringMode;
+  example: boolean;
   metrics: Metrics;
-  /** 95% Wilson interval for accuracy, or null when the run has no samples. */
+  /** 95% interval of the main metric when it is a proportion (kept for v0.1 clients). */
   accuracy_ci: [number, number] | null;
+  headline: Headline;
 }
 
 export interface RunConfig {
   task: string;
   model: string;
   model_args: Record<string, unknown>;
-  generate: { temperature: number | null; max_tokens: number | null };
+  generate: { temperature: number | null; max_tokens: number | null; seed?: number | null };
   positive_class: string | null;
   limit: number | null;
   max_concurrency: number;
   timeout_s: number;
   retries: number;
   system_prompt: string | null;
+  task_spec?: Record<string, unknown> | null;
+  scoring_mode?: ScoringMode | null;
+  prompt?: Record<string, unknown>;
+  scorer?: Record<string, unknown>;
+  model_info?: Record<string, unknown>;
 }
 
 export interface HistogramBin {
@@ -39,6 +65,7 @@ export interface HistogramBin {
 
 export interface RunDetail extends RunSummary {
   config: RunConfig;
+  labels: string[] | null;
   sample_counts: { total: number; errors: number };
   has_probabilities: boolean;
   latency_histogram: HistogramBin[];
@@ -66,13 +93,7 @@ export interface SamplePage {
   items: SampleItem[];
 }
 
-export type SampleFilter =
-  | "all"
-  | "correct"
-  | "incorrect"
-  | "false_positive"
-  | "false_negative"
-  | "unparseable";
+export type SampleFilter = "all" | "correct" | "incorrect" | "false_positive" | "false_negative" | "unparseable";
 
 export interface ThresholdPoint {
   threshold: number;
@@ -91,14 +112,6 @@ export interface ThresholdCurve {
   n: number;
   run_threshold: number;
   points: ThresholdPoint[];
-}
-
-export interface Disagreement {
-  sample_id: string;
-  input: string;
-  target: string;
-  preds: Record<string, string | null>;
-  correct: Record<string, boolean>;
 }
 
 export interface RocCurve {
@@ -134,11 +147,22 @@ export interface LengthSlice {
   ci_high: number;
 }
 
+export interface MulticlassReport {
+  labels: string[];
+  per_class: { label: string; precision: number; recall: number; f1: number; support: number }[];
+  macro_f1: number;
+  weighted_f1: number;
+  matrix: number[][];
+  matrix_columns: string[];
+}
+
 export interface Analysis {
   roc: RocCurve | null;
   pr: PrCurve | null;
   score_distribution: ScoreBin[] | null;
   calibration: Calibration | null;
+  multiclass: MulticlassReport | null;
+  judge: { kind: "passfail" | "scale"; distribution: { score: string; count: number }[] } | null;
   length_slices: LengthSlice[];
   latency_points: { index: number; latency_ms: number; correct: boolean }[];
   latency_by_outcome: {
@@ -156,10 +180,17 @@ export interface PairwiseStat {
   mcnemar_p: number;
 }
 
+export interface Disagreement {
+  sample_id: string;
+  input: string;
+  target: string;
+  preds: Record<string, string | null>;
+  correct: Record<string, boolean>;
+}
+
 export interface Comparison {
   runs: RunSummary[];
   sample_ids: string[];
-  /** Per run: was each shared sample (in `sample_ids` order) answered correctly. */
   outcomes: Record<string, boolean[]>;
   coverage: { all_correct: number; all_wrong: number; any_correct: number };
   pairwise: PairwiseStat[];
@@ -173,14 +204,17 @@ export interface Comparison {
 
 export interface ArgSpec {
   name: string;
-  type: "string" | "number" | "integer" | "boolean";
-  default: string | number | boolean | null;
+  type: "string" | "number" | "integer" | "boolean" | "json";
+  default: unknown;
   description: string;
   affects_models: boolean;
+  label: string;
+  choices: string[];
 }
 
 export interface ProviderInfo {
   name: string;
+  display_name: string;
   description: string;
   max_concurrency: number;
   binary_only: boolean;
@@ -196,10 +230,14 @@ export interface ProviderModels {
 export interface TaskInfo {
   name: string;
   description: string;
+  example: boolean;
+  scoring_mode: ScoringMode;
   binary: boolean;
   positive_class: string | null;
+  labels: string[] | null;
   expected_size: number | null;
   system_prompt: string | null;
+  prompt: Record<string, unknown>;
   temperature: number | null;
   max_tokens: number | null;
 }
@@ -207,8 +245,13 @@ export interface TaskInfo {
 export interface AppConfig {
   version: string;
   binary_answer_instruction: string;
+  multiclass_system_prompt: string;
+  rubrics: Record<"passfail" | "scale", { with_reference: string; without_reference: string }>;
   max_upload_bytes: number;
-  default_max_tokens: { binary: number; exact_match: number };
+  formats: string;
+  default_temperature: number;
+  default_seed: number;
+  default_max_tokens: Record<"binary" | "multiclass" | "exact_match" | "judge", number>;
 }
 
 export interface DatasetInfo {
@@ -220,6 +263,7 @@ export interface DatasetInfo {
   columns: string[];
   size_bytes: number;
   created_at: string;
+  source: { hub: string; config: string | null; split: string; revision: string | null; max_rows?: number } | null;
   preview?: Record<string, string>[];
 }
 
@@ -228,28 +272,77 @@ export interface ColumnValues {
   values: { value: string; count: number }[];
 }
 
+export interface SavedModel {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  settings: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SavedModelIn {
+  name: string;
+  provider: string;
+  model: string;
+  settings: Record<string, unknown>;
+}
+
+export interface ProbeResult {
+  ok: boolean;
+  latency_ms: number | null;
+  setup_ms: number | null;
+  output: string | null;
+  probability: number | null;
+  model_info: Record<string, unknown>;
+  error: string | null;
+}
+
+export type CustomKind = "binary" | "multiclass" | "exact_match" | "judge";
+
 export interface CustomTaskSpec {
   name: string;
   dataset_id: string;
   input_column: string;
-  target_column: string;
-  kind: "binary" | "exact_match";
+  target_column: string | null;
+  kind: CustomKind;
   positive_label?: string | null;
   question?: string | null;
+  labels?: string[] | null;
   system_prompt?: string | null;
-  case_sensitive?: boolean;
+  user_template?: string | null;
+  normalization?: { case: boolean; whitespace: boolean; punctuation: boolean } | null;
+  judge?: {
+    model_id?: string | null;
+    provider?: string | null;
+    model?: string | null;
+    args?: Record<string, unknown>;
+    rubric: "passfail" | "scale";
+    template?: string | null;
+  } | null;
   temperature?: number | null;
   max_tokens?: number | null;
+}
+
+export interface ModelRef {
+  model_id?: string;
+  provider?: string;
+  model?: string;
+  args?: Record<string, unknown>;
 }
 
 export interface RunRequest {
   task?: string;
   custom?: CustomTaskSpec;
-  models: { provider: string; model: string; args: Record<string, unknown> }[];
+  models: ModelRef[];
   limit?: number | null;
   max_concurrency?: number | null;
   timeout_s?: number;
   retries?: number;
+  temperature?: number | null;
+  max_tokens?: number | null;
+  seed?: number | null;
 }
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -266,6 +359,7 @@ export interface JobItem {
   started_at: string | null;
   finished_at: string | null;
   accuracy: number | null;
+  main_metric: { name: string; value: number } | null;
 }
 
 export interface Job {
@@ -273,6 +367,8 @@ export interface Job {
   status: JobStatus;
   task: string;
   description: string;
+  scoring_mode: ScoringMode;
+  warnings: string[];
   created_at: string;
   finished_at: string | null;
   cancel_requested: boolean;
@@ -308,7 +404,7 @@ async function get<T>(path: string, params?: Record<string, string | number | un
   return res.json() as Promise<T>;
 }
 
-async function send<T>(method: "POST" | "DELETE", path: string, body?: unknown): Promise<T> {
+async function send<T>(method: "POST" | "PUT" | "DELETE", path: string, body?: unknown): Promise<T> {
   const res = await fetch(path, {
     method,
     headers: body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -334,10 +430,20 @@ export const api = {
   providerModels: (name: string, args: Record<string, string>) => get<ProviderModels>(`/api/providers/${name}/models`, args),
   tasks: () => get<TaskInfo[]>("/api/tasks"),
 
+  models: () => get<SavedModel[]>("/api/models"),
+  createModel: (m: SavedModelIn) => send<SavedModel>("POST", "/api/models", m),
+  updateModel: (id: string, m: SavedModelIn) => send<SavedModel>("PUT", `/api/models/${id}`, m),
+  deleteModel: (id: string) => send<void>("DELETE", `/api/models/${id}`),
+  testModel: (id: string) => send<ProbeResult>("POST", `/api/models/${id}/test`),
+  testUnsaved: (m: SavedModelIn) => send<ProbeResult>("POST", "/api/models/test", m),
+  modelSuggestions: () => get<{ items: SavedModelIn[]; error: string | null }>("/api/models/suggestions"),
+
   datasets: () => get<DatasetInfo[]>("/api/datasets"),
-  dataset: (id: string) => get<DatasetInfo>(`/api/datasets/${id}`),
+  dataset: (id: string, rows = 5) => get<DatasetInfo>(`/api/datasets/${id}`, { rows }),
   datasetValues: (id: string, column: string) => get<ColumnValues>(`/api/datasets/${id}/values`, { column }),
   deleteDataset: (id: string) => send<void>("DELETE", `/api/datasets/${id}`),
+  importHf: (body: { dataset: string; split: string; config?: string | null; max_rows?: number | null; name?: string | null }) =>
+    send<DatasetInfo>("POST", "/api/datasets/import-hf", body),
   /** Raw body upload: no multipart, and a non-simple content type so other sites cannot post here. */
   async uploadDataset(file: File): Promise<DatasetInfo> {
     const url = new URL("/api/datasets", window.location.origin);

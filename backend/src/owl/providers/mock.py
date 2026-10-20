@@ -23,6 +23,7 @@ _MODES = ("keyword", "always1", "always0", "think", "garbage")
 class MockProvider(Provider):
     name = "mock"
     max_concurrency = 4
+    display_name = "Mock (for testing)"
     description = "Deterministic fake models for trying the app without a real model. Answers by keyword."
     arg_specs = (
         ArgSpec("fail_if_contains", "string", None, "Fail on inputs containing this text, to see how errors are recorded."),

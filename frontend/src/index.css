@@ -1,29 +1,339 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Owl design system: dark glass.
+   Tokens first, then the surfaces (background fields, glass tiers), controls,
+   motion. Everything honours prefers-reduced-motion, and a browser without
+   backdrop-filter gets the same layout on solid translucent surfaces.
+   --------------------------------------------------------------------------- */
+
 @theme {
-  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter Variable", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
-  /* single accent colour; red is used only for errors and incorrect results */
-  --color-accent: #1d4ed8;
-  --color-accent-soft: #e0e9fb;
-  --color-danger: #b42318;
+
+  /* text */
+  --color-ink: #eef2f8; /* primary */
+  --color-sub: #cdd5e1; /* secondary, cool grey */
+  --color-faint: #bcc4d2; /* labels and captions; still AA (4.5:1) on every surface */
+
+  /* accent: a gradient from indigo to cyan, plus solid stops for text and lines */
+  --color-accent: #b5bfff;
+  --color-accent-from: #818cf8;
+  --color-accent-to: #22d3ee;
+
+  /* semantic */
+  --color-ok: #4ade80;
+  --color-warn: #fbbf24;
+  --color-bad: #fdadb8;
+
+  --radius-glass: 16px;
+  --radius-control: 10px;
 }
 
+:root {
+  color-scheme: dark;
+  --bg: #070b16;
+  --line: rgb(255 255 255 / 0.1);
+  --line-strong: rgb(255 255 255 / 0.16);
+  --glass: rgb(255 255 255 / 0.06);
+  --glass-dense: rgb(255 255 255 / 0.13);
+  --glass-control: rgb(255 255 255 / 0.08);
+  --accent-gradient: linear-gradient(135deg, var(--color-accent-from), var(--color-accent-to));
+  --shadow: 0 12px 32px rgb(0 0 0 / 0.35);
+}
+
+html,
 body {
-  background: #f8fafc;
-  color: #0f172a;
+  background: var(--bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
   font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Component classes live in a layer so Tailwind utilities (w-52, h-8, ...) can override them. */
+@layer components {
+/* The three colour fields: fixed, static, painted once behind everything. */
+.app-fields {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(42vw 42vw at 8% 6%, rgb(79 70 229 / 0.2), transparent 70%),
+    radial-gradient(40vw 40vw at 92% 18%, rgb(13 148 136 / 0.15), transparent 70%),
+    radial-gradient(48vw 48vw at 62% 100%, rgb(124 58 237 / 0.17), transparent 70%),
+    var(--bg);
+}
+
+/* --- glass tiers ------------------------------------------------------------ */
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-glass);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.07),
+    var(--shadow);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+}
+
+/* For tables, numbers and code: more opaque so dense text stays readable.
+   No blur of its own: it usually sits inside a .glass card, and stacking
+   blur layers is what makes glass UIs slow. */
+.glass-dense {
+  background: var(--glass-dense);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.glass-control {
+  background: var(--glass-control);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass {
+    background: rgb(22 28 46 / 0.94);
+  }
+  .glass-dense {
+    background: rgb(36 43 63 / 0.96);
+  }
+  .glass-control {
+    background: rgb(30 37 56 / 0.96);
+  }
+}
+
+/* --- text helpers ------------------------------------------------------------ */
+
+.num {
+  font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
 }
 
-/* recharts defaults to its own font; keep charts consistent with the page */
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-faint);
+}
+
+.gradient-text {
+  background: var(--accent-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+a {
+  color: inherit;
+}
+
+/* --- controls ------------------------------------------------------------------ */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  transition:
+    filter 120ms ease,
+    background-color 120ms ease,
+    border-color 120ms ease;
+  cursor: pointer;
+}
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.btn-primary {
+  background: var(--accent-gradient);
+  color: #061019;
+  box-shadow: 0 6px 18px rgb(56 189 248 / 0.18);
+}
+.btn-primary:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+.btn-secondary {
+  background: var(--glass-control);
+  border: 1px solid var(--line-strong);
+  color: var(--color-ink);
+}
+.btn-secondary:not(:disabled):hover {
+  background: rgb(255 255 255 / 0.13);
+}
+.btn-quiet {
+  color: var(--color-sub);
+  padding: 0 10px;
+}
+.btn-quiet:not(:disabled):hover {
+  color: var(--color-ink);
+  background: rgb(255 255 255 / 0.06);
+}
+.btn-danger {
+  color: var(--color-bad);
+  padding: 0 10px;
+}
+.btn-danger:not(:disabled):hover {
+  background: rgb(251 113 133 / 0.12);
+}
+
+.input {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  background: rgb(8 12 24 / 0.55);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-control);
+  color: var(--color-ink);
+  font-size: 13px;
+}
+textarea.input {
+  height: auto;
+  padding: 8px 10px;
+  line-height: 1.5;
+}
+select.input {
+  padding-right: 28px;
+}
+select.input option {
+  background: #121829;
+  color: var(--color-ink);
+}
+.input::placeholder {
+  color: rgb(188 196 210 / 0.75);
+}
+.input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgb(99 102 241 / 0.25);
+}
+.input:disabled {
+  opacity: 0.55;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent-to);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+  accent-color: #6d8cff;
+}
+
+/* active states: tabs and navigation get the accent gradient */
+.accent-bar {
+  background: var(--accent-gradient);
+}
+
+/* scrollbars that belong to a dark UI */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.18) transparent;
+}
+
+/* --- motion ----------------------------------------------------------------------- */
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.rise {
+  animation: rise 220ms ease-out both;
+}
+
+@keyframes sheen {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+.progress-fill {
+  position: relative;
+  overflow: hidden;
+  background: var(--accent-gradient);
+}
+.progress-fill.running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.45), transparent);
+  animation: sheen 1.4s ease-in-out infinite;
+}
+
+/* charts: no focus ring on the svg after a click; keep fonts consistent */
 .recharts-wrapper,
 .recharts-text {
   font-family: var(--font-sans);
 }
-
-/* no focus ring on the chart canvas after clicking it */
 .recharts-wrapper:focus,
 .recharts-wrapper *:focus {
   outline: none;
+}
+
+/* tooltips built with CSS only */
+.tip {
+  position: relative;
+}
+.tip > .tip-body {
+  visibility: hidden;
+  opacity: 0;
+  position: absolute;
+  z-index: 30;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgb(17 23 40 / 0.97);
+  border: 1px solid var(--line-strong);
+  color: var(--color-sub);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.45;
+  text-transform: none;
+  letter-spacing: 0;
+  box-shadow: var(--shadow);
+  transition: opacity 120ms ease;
+}
+.tip:hover > .tip-body,
+.tip:focus-within > .tip-body {
+  visibility: visible;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .progress-fill.running::after {
+    display: none;
+  }
+}
 }
