@@ -1,0 +1,29 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  /* single accent colour; red is used only for errors and incorrect results */
+  --color-accent: #1d4ed8;
+  --color-accent-soft: #e0e9fb;
+  --color-danger: #b42318;
+}
+
+body {
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 14px;
+  font-feature-settings: "tnum";
+}
+
+/* recharts defaults to its own font; keep charts consistent with the page */
+.recharts-wrapper,
+.recharts-text {
+  font-family: var(--font-sans);
+}
+
+/* no focus ring on the chart canvas after clicking it */
+.recharts-wrapper:focus,
+.recharts-wrapper *:focus {
+  outline: none;
+}
