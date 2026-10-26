@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "owl-harness"
+version = "0.2.0"
+description = "Owl Harness: a small model evaluation harness with a FastAPI backend and React dashboard"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.148.0",
+    "uvicorn==0.54.0",
+    "pydantic==2.14.1",
+    "httpx==0.28.1",
+    "typer==0.27.3",
+]
+
+[project.optional-dependencies]
+# Hugging Face datasets: dataset import from the Hub and the prompt_injection example
+hf = ["datasets==5.1.0", "pyarrow==26.0.0"]
+# Parquet uploads
+parquet = ["pyarrow==26.0.0"]
+# The hf provider: run Hugging Face models locally (CPU torch from PyPI)
+hf-models = ["transformers==5.20.2", "torch==2.14.1", "sentencepiece==0.2.2", "protobuf==7.36.2"]
+dev = ["pytest==9.1.1", "pytest-asyncio==1.4.0"]
+
+[project.scripts]
+owl = "owl.cli:app"
+
+# Built-in providers are registered through the same entry point group that
+# third-party plugins use.
+[project.entry-points."owl.providers"]
+mock = "owl.providers.mock:MockProvider"
+ollama = "owl.providers.ollama:OllamaProvider"
+openai = "owl.providers.openai:OpenAIProvider"
+hf = "owl.providers.hf:HFProvider"
+http = "owl.providers.http:HTTPProvider"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/owl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
